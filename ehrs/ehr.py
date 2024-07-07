@@ -85,6 +85,9 @@ class EHR(object):
         self.bilirubin = cfg.bilirubin
         self.platelets = cfg.platelets
         self.wbc = cfg.wbc
+        self.hb = cfg.hb
+        self.bicarbonate = cfg.bicarbonate
+        self.sodium = cfg.sodium
 
         self.chunk_size = cfg.chunk_size
 
@@ -109,7 +112,7 @@ class EHR(object):
         self.cls_type_id = 5
         self.sep_type_id = 6
 
-        self.others_dpe_id = 0
+        self.others_dpe_id = 14
 
         self._icustay_fname = None
         self._patient_fname = None
@@ -119,6 +122,7 @@ class EHR(object):
         self._icustay_key = None
         self._hadm_key = None
 
+        self.max_time_len = 3 if self.obs_size > 12 else 2
 
     @property
     def icustay_fname(self):
@@ -179,6 +183,7 @@ class EHR(object):
         icustays = icustays[
             (self.min_age <= icustays["AGE"]) & (icustays["AGE"] <= self.max_age)
         ]
+        icustays['GENDER'] = icustays['gender'].astype(str)
 
         # we define labels for the readmission task in this step
         # since it requires to observe each next icustays,
@@ -217,7 +222,7 @@ class EHR(object):
         logger.info(
             "Start labeling cohorts for predictive tasks."
         )
-
+        
         labeled_cohorts = cohorts[[
             self.hadm_key,
             self.icustay_key,
@@ -229,6 +234,8 @@ class EHR(object):
             "DISCHTIME",
             "IN_ICU_MORTALITY",
             "HOS_DISCHARGE_LOCATION",
+            "GENDER",
+            "AGE",
         ]].copy()
 
         # mortality prediction
@@ -357,7 +364,8 @@ class EHR(object):
         # in: cohorts, sparksession
         # out: Spark DataFrame with (stay_id, time offset, inp, type, dpe)
         if isinstance(cohorts, pd.DataFrame):
-            cohorts = cohorts[[self.hadm_key, self.icustay_key, "INTIME", "OUTTIME"]]
+            # cohorts = cohorts[[self.hadm_key, self.icustay_key, "INTIME", "OUTTIME"]]
+            cohorts = cohorts[[self.hadm_key, self.icustay_key, "INTIME", "OUTTIME", "AGE", "GENDER", "long_term_mortality"]]
             logger.info("Start Preprocessing Tables, Cohort Numbers: {}".format(len(cohorts)))
             cohorts = spark.createDataFrame(cohorts)
             print("Converted Cohort to Pyspark DataFrame")
@@ -366,6 +374,7 @@ class EHR(object):
             
 
         events_dfs = []
+        vocab_dict = dict() 
         for table in self.tables:
             fname = table["fname"]
             table_name = fname.split('/')[-1][: -len(self.ext)]
@@ -455,7 +464,8 @@ class EHR(object):
                     number_ids = [121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 119]
                     numbers = [i for i, j in enumerate(tokens) if j in number_ids]
                     numbers_cnt = 0
-                    data_dpe = [0] * len(tokens)
+                    # data_dpe = [0] * len(tokens)
+                    data_dpe = [0 if j == 0 else self.others_dpe_id for j in tokens]
                     for group in number_groups:
                         if group[0] == "." * len(group[0]):
                             numbers_cnt += len(group[0])
@@ -486,6 +496,39 @@ class EHR(object):
 
             encoded_table_name = process_unit(table_name, self.table_type_id)
             encoded_cols = {k: process_unit(k, self.column_type_id) for k in events.columns}
+ 
+            # Extract unique values for vocab dictionary
+            vocab_dict[table_name] = {col: {'word': set(), 'numeric': False} for col in events.columns if col not in [self.icustay_key, "TIME"]}
+            for col in events.columns:
+                if col in [self.icustay_key, "TIME"]:
+                    continue
+                if col in table["numeric"]:
+                    # Filter out null and empty string values and calculate min and max
+                    # non_null_events = events.filter(F.col(col).isNotNull())
+                    non_null_events = events.filter((F.col(col).isNotNull()) & (F.col(col) != " "))
+
+                    # Aggregate the minimum and maximum values
+                    min_val = non_null_events.agg(F.min(col)).collect()[0][0]
+                    max_val = non_null_events.agg(F.max(col)).collect()[0][0]
+
+                    # Check if min_val and max_val are not null, then update the vocab_dict
+                    if min_val is not None and max_val is not None:
+                        vocab_dict[table_name][col]['numeric'] = True
+                        vocab_dict[table_name][col]['min'] = float(min_val)
+                        vocab_dict[table_name][col]['max'] = float(max_val)
+                    else:
+                        # Handle the case where min_val or max_val is None (if all values are null)
+                        vocab_dict[table_name][col]['numeric'] = False
+                        vocab_dict[table_name][col]['min'] = None
+                        vocab_dict[table_name][col]['max'] = None
+
+                else:
+                    unique_vals = events.select(col).distinct().collect()
+                    for row in unique_vals:
+                        text = re.sub(r"([0-9\.])", r" \1 ", str(row[col]))
+                        tokenized_text = self.tokenizer.decode(self.tokenizer.encode(text)[1:-1])
+                        words = tokenized_text.split()
+                        vocab_dict[table_name][col]['word'].update(words)
 
             schema = StructType(
                 [
@@ -506,10 +549,14 @@ class EHR(object):
                     input_ids += encoded_table_name[0]
                     types += encoded_table_name[1]
                     dpes += encoded_table_name[2]
-                    encoded_table_name
+                    
                     for col, val in row.items():
                         if col in [self.icustay_key, "TIME"] or val is None:
                             continue
+                        # Remove empty events
+                        elif (val == "") or (val == " "):
+                            continue
+
                         encoded_col = encoded_cols[col]
                         encoded_val = process_unit(val, self.value_type_id)
                         if len(input_ids) + len(encoded_col[0]) + len(encoded_val[0]) + 2 <= self.max_event_token_len:
@@ -529,10 +576,10 @@ class EHR(object):
                     .select(self.icustay_key, "TIME", "INPUTS", "TYPES", "DPES")
             )
             events_dfs.append(events)
-        return reduce(lambda x, y: x.union(y), events_dfs)
+        return reduce(lambda x, y: x.union(y), events_dfs), vocab_dict
 
 
-    def make_input(self, cohorts, events, spark):
+    def make_input(self, cohorts, events, vocab_dict, spark):
         @F.pandas_udf(returnType="TIME int", functionType=F.PandasUDFType.GROUPED_MAP)
         def _make_input(events):
             # Actually, this function does not have to return anything.
@@ -556,36 +603,38 @@ class EHR(object):
             if len(df)<=self.min_event_size:
                 return events["TIME"].to_frame()
 
-            make_hi = lambda cls_id, sep_id, iterable: [[cls_id] + list(i) + [sep_id] for i in iterable]
-            make_fl = lambda cls_id, sep_id, iterable: [cls_id] + list(chain(*[list(i) + [sep_id] for i in iterable]))
-            
-            hi_input = make_hi(self.cls_token_id, self.sep_token_id, df["INPUTS"])
-            hi_type = make_hi(self.cls_type_id, self.sep_type_id, df["TYPES"])
-            hi_dpe = make_hi(self.others_dpe_id, self.others_dpe_id, df["DPES"])
+            # make_hi = lambda cls_id, sep_id, iterable: [[cls_id] + list(i) + [sep_id] for i in iterable]
+            # make_fl = lambda cls_id, sep_id, iterable: [cls_id] + list(chain(*[list(i) + [sep_id] for i in iterable]))
+            make_hi = lambda sep_id, iterable: [list(i) + [sep_id] for i in iterable]
 
-            fl_input = make_fl(self.cls_token_id, self.sep_token_id, df["INPUTS"])
-            fl_type = make_fl(self.cls_type_id, self.sep_type_id, df["TYPES"])
-            fl_dpe = make_fl(self.others_dpe_id, self.others_dpe_id, df["DPES"])
+            hi_input = make_hi(self.sep_token_id, df["INPUTS"])
+            hi_type = make_hi(self.sep_type_id, df["TYPES"])
+            hi_dpe = make_hi(self.others_dpe_id, df["DPES"])
 
             assert len(hi_input) <= self.max_event_size, hi_input
             assert all([len(i)<=self.max_event_token_len for i in hi_input]), hi_input
-            assert len(fl_input) <= self.max_patient_token_len, fl_input
+            # assert len(fl_input) <= self.max_patient_token_len, fl_input
 
             # Add padding to save as numpy array
             hi_input = np.array([np.pad(i, (0, self.max_event_token_len - len(i)), mode='constant') for i in hi_input])
             hi_type = np.array([np.pad(i, (0, self.max_event_token_len - len(i)), mode='constant') for i in hi_type])
             hi_dpe = np.array([np.pad(i, (0, self.max_event_token_len - len(i)), mode='constant') for i in hi_dpe])
 
-            fl_input = np.pad(fl_input, (0, self.max_patient_token_len - len(fl_input)), mode='constant')
-            fl_type = np.pad(fl_type, (0, self.max_patient_token_len - len(fl_type)), mode='constant')
-            fl_dpe = np.pad(fl_dpe, (0, self.max_patient_token_len - len(fl_dpe)), mode='constant')
-            
+            num_padding_rows = self.max_event_size - len(hi_input)
+            padding_rows = np.zeros((num_padding_rows, self.max_event_token_len))
+
+            hi_input = np.vstack([hi_input, padding_rows])
+            hi_type = np.vstack([hi_type, padding_rows])
+            hi_dpe = np.vstack([hi_dpe, padding_rows])
+
             stay_id = df[self.icustay_key].values[0]
+            floored_time = floor_time(df["TIME"].values)
+
             # Create caches (cannot write to hdf5 directly with pyspark)
             data = {
                 "hi": np.stack([hi_input, hi_type, hi_dpe], axis=1).astype(np.int16),
-                "fl": np.stack([fl_input, fl_type, fl_dpe], axis=0).astype(np.int16),
                 "time": df["TIME"].values,
+                "floored_time": floored_time,
             }
             with open(os.path.join(self.cache_dir, self.ehr_name, f"{stay_id}.pkl"), "wb") as f:
                 pickle.dump(data, f)
@@ -601,17 +650,78 @@ class EHR(object):
         f = h5py.File(os.path.join(self.dest, f"{self.ehr_name}.h5"), "w")
         ehr_g = f.create_group("ehr")
 
+        # Calculate statistical metrics on the event lengths
+        all_event_lengths = []
+
+        for stay_id_file in tqdm(os.listdir(os.path.join(self.cache_dir, self.ehr_name))):
+            with open(os.path.join(self.cache_dir, self.ehr_name, stay_id_file), 'rb') as f:
+                data = pickle.load(f)
+            all_event_lengths.append(len(data["time"]))
+
+        avg_len = int(np.mean(all_event_lengths))
+        med_len = int(np.median(all_event_lengths))
+        p90_len = int(np.percentile(all_event_lengths, 90))
+        p95_len = int(np.percentile(all_event_lengths, 95))
+        max_len = int(np.max(all_event_lengths))
+
+        print(f"Avg length: {avg_len}, Median length: {med_len}, 90% length: {p90_len}, 95% length: {p95_len}, Max length: {max_len}")
+
         active_stay_ids = []
 
         for stay_id_file in tqdm(os.listdir(os.path.join(self.cache_dir, self.ehr_name))):
             stay_id = stay_id_file.split(".")[0]
             with open(os.path.join(self.cache_dir, self.ehr_name, stay_id_file), 'rb') as f:
                 data = pickle.load(f)
+            
+            # Truncate the 'hi' data to the 95th percentile length and separate into different components
+            truncated_hi_input = data['hi'][:p95_len, 0]
+            truncated_hi_type = data['hi'][:p95_len, 1]
+            truncated_hi_dpe = data['hi'][:p95_len, 2]
+
+            truncated_hi = np.stack([truncated_hi_input, truncated_hi_type, truncated_hi_dpe], axis=1).astype(np.int16)
+            truncated_time = data['time'][:p95_len]
+            truncated_floored_time = data['floored_time'][:p95_len]
+
+            # Create a group in the HDF5 file for the current stay ID
             stay_g = ehr_g.create_group(str(stay_id))
-            stay_g.create_dataset('hi', data=data['hi'], dtype='i2', compression='lzf', shuffle=True)
-            stay_g.create_dataset('fl', data=data['fl'], dtype='i2', compression='lzf', shuffle=True)
-            stay_g.create_dataset('time', data = data['time'], dtype='i')
+
+            # Create datasets for the truncated data within the group
+            stay_g.create_dataset('hi', data=truncated_hi, dtype='i2', compression='lzf', shuffle=True)
+            stay_g.create_dataset('time', data=truncated_time, dtype='i')
+            stay_g.create_dataset('floored_time', data=truncated_floored_time, dtype='i')
+
             active_stay_ids.append(int(stay_id))
+
+            # stay_g = ehr_g.create_group(str(stay_id))
+            # stay_g.create_dataset('hi', data=data['hi'], dtype='i2', compression='lzf', shuffle=True)
+            # stay_g.create_dataset('time', data=data['time'], dtype='i')
+            # stay_g.create_dataset('floored_time', data=data['floored_time'], dtype='i')
+            # active_stay_ids.append(int(stay_id))
+
+        # Create Predef Vocab Dictionary
+        predef_vocab = dict()
+        for table in vocab_dict.keys():
+            table_key = re.sub(r"([0-9\.])", r" \1 ", table)
+            table_key = self.tokenizer.decode(self.tokenizer.encode(table_key)[1:-1])
+            predef_vocab[table_key] = dict()
+            for column in vocab_dict[table].keys():
+                column_key = re.sub(r"([0-9\.])", r" \1 ", column)
+                column_key = self.tokenizer.decode(self.tokenizer.encode(column_key)[1:-1])
+                numeric = vocab_dict[table][column]['numeric']
+
+                if numeric:
+                    predef_vocab[table_key][column_key] = (
+                        (vocab_dict[table][column]['min'], vocab_dict[table][column]['max']),
+                        numeric
+                    )
+                else:
+                    predef_vocab[table_key][column_key] = (
+                        {"word": list(set(vocab_dict[table][column]['word']))},
+                        numeric
+                    )
+
+        with open(os.path.join(self.dest, f"{self.ehr_name}_predef_vocab.pickle"), 'wb') as handle:
+            pickle.dump(predef_vocab, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
         shutil.rmtree(os.path.join(self.cache_dir, self.ehr_name), ignore_errors=True)
         # Drop patients with few events
@@ -653,8 +763,8 @@ class EHR(object):
     def run_pipeline(self, spark) -> None:
         cohorts = self.build_cohorts(cached=self.cache)
         labeled_cohorts = self.prepare_tasks(cohorts, spark, cached=self.cache)
-        events = self.process_tables(labeled_cohorts, spark)
-        self.make_input(labeled_cohorts, events, spark)
+        events, vocab_dict = self.process_tables(labeled_cohorts, spark)
+        self.make_input(labeled_cohorts, events, vocab_dict, spark)
 
     def add_special_tokens(self, new_special_tokens: Union[str, List]) -> None:
         if isinstance(new_special_tokens, str):
@@ -783,3 +893,29 @@ class EHR(object):
                 "-P", dest,
             ]
         )
+
+
+def floor_time(data, time_window=10, max_time_len=2):
+    """
+    Floors the input data to the nearest time window and optionally scales it down.
+    
+    Parameters:
+    - data (array-like): The input time data to be floored.
+    - time_window (int): The time window to floor the data to.
+    - max_time_len (int): Determines the format of the returned data. If 3, data is split into
+      hundreds, tens, and ones places. If 2 (default), data is split into tens and ones.
+
+    Returns:
+    - list: A list of floored (and optionally scaled) time data, split according to max_time_len.
+    """
+    
+    # Floor the data to the nearest time window
+    floored_data = np.floor(data / time_window).astype(int) * time_window
+    # Scale down the data for further processing
+    scaled_down_data = floored_data // 10
+    
+    # Split the scaled data based on max_time_len
+    if max_time_len == 3:
+        return np.array([[x // 100, (x % 100) // 10, x % 10] for x in scaled_down_data])
+    else:
+        return np.array([[x // 10, x % 10] for x in scaled_down_data])

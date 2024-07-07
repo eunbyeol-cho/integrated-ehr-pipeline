@@ -1,4 +1,9 @@
 import os
+import time
+
+os.environ["TZ"] = "UTC"
+time.tzset()
+
 import sys
 import logging
 import argparse
@@ -161,6 +166,18 @@ def get_parser():
         "--wbc", action='store_true',
         help="whether to include blood white blood cell count task or not"
     )
+    parser.add_argument(
+        "--hb", action='store_true',
+        help="whether to include blood white blood cell count task or not"
+    )
+    parser.add_argument(
+        "--bicarbonate", action='store_true',
+        help="whether to include blood white blood cell count task or not"
+    )
+    parser.add_argument(
+        "--sodium", action='store_true',
+        help="whether to include blood white blood cell count task or not"
+    )
 
 
     parser.add_argument(
@@ -185,6 +202,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--use_more_tables",
+        action="store_true",
+        help="Use more tables including chartevents, Not supported on MIMIC-III",
+    )
+
+
+    parser.add_argument(
         '--num_threads', type=int, default=8, help='number of threads to use'
     )
     return parser
@@ -202,6 +226,7 @@ def main(args):
         .config("spark.driver.memory", "100g")
         .config("spark.driver.maxResultSize", "10g")
         .config("spark.network.timeout", "100s")
+        .config("spark.sql.session.timeZone", "UTC")
         .appName("Main_Preprocess")
         .getOrCreate()
     )

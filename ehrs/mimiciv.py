@@ -73,6 +73,7 @@ class MIMICIV(EHR):
                 "code": ["itemid"],
                 "desc": ["hosp/d_labitems" + self.ext],
                 "desc_key": ["label"],
+                "numeric": ["valuenum", "ref_range_lower", "ref_range_upper"]
             },
             {
                 "fname": "hosp/prescriptions" + self.ext,
@@ -89,6 +90,7 @@ class MIMICIV(EHR):
                     "stoptime",
                     "order_provider_id", #MIMIC-IV-2.2V added this column
                 ],
+                "numeric": ["doses_per_24_hrs"]
             },
             {
                 "fname": "icu/inputevents" + self.ext,
@@ -106,6 +108,7 @@ class MIMICIV(EHR):
                 "code": ["itemid"],
                 "desc": ["icu/d_items" + self.ext],
                 "desc_key": ["label"],
+                "numeric": ["amount", "rate", "patientweight", "totalamount", "originalamount", "originalrate", "isopenbag"]
             },
         ]
 
