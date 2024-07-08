@@ -504,8 +504,8 @@ class EHR(object):
                     continue
                 if col in table["numeric"]:
                     # Filter out null and empty string values and calculate min and max
-                    # non_null_events = events.filter(F.col(col).isNotNull())
                     non_null_events = events.filter((F.col(col).isNotNull()) & (F.col(col) != " "))
+                    non_null_events = non_null_events.withColumn(col, F.col(col).cast("float"))
 
                     # Aggregate the minimum and maximum values
                     min_val = non_null_events.agg(F.min(col)).collect()[0][0]
@@ -628,7 +628,7 @@ class EHR(object):
             hi_dpe = np.vstack([hi_dpe, padding_rows])
 
             stay_id = df[self.icustay_key].values[0]
-            floored_time = floor_time(df["TIME"].values)
+            floored_time = floor_time(df["TIME"].values, max_time_len=self.max_time_len)
 
             # Create caches (cannot write to hdf5 directly with pyspark)
             data = {
