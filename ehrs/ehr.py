@@ -514,8 +514,8 @@ class EHR(object):
                     # Check if min_val and max_val are not null, then update the vocab_dict
                     if min_val is not None and max_val is not None:
                         vocab_dict[table_name][col]['numeric'] = True
-                        vocab_dict[table_name][col]['min'] = float(min_val)
-                        vocab_dict[table_name][col]['max'] = float(max_val)
+                        vocab_dict[table_name][col]['min'] = round(float(min_val), 4)
+                        vocab_dict[table_name][col]['max'] = round(float(max_val), 4)
                     else:
                         # Handle the case where min_val or max_val is None (if all values are null)
                         vocab_dict[table_name][col]['numeric'] = False
