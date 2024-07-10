@@ -525,7 +525,9 @@ class EHR(object):
                 else:
                     unique_vals = events.select(col).distinct().collect()
                     for row in unique_vals:
-                        text = re.sub(r"([0-9\.])", r" \1 ", str(row[col]))
+                        # text = re.sub(r"([0-9\.])", r" \1 ", str(row[col]))
+                        text = re.sub(r"\d*\.\d+", lambda x: str(round(float(x.group(0)), 4)), str(row[col]))
+                        text = re.sub(r"([0-9\.])", r" \1 ", text)
                         tokenized_text = self.tokenizer.decode(self.tokenizer.encode(text)[1:-1])
                         words = tokenized_text.split()
                         vocab_dict[table_name][col]['word'].update(words)
