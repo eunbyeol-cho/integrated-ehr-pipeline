@@ -498,7 +498,7 @@ class EHR(object):
             encoded_cols = {k: process_unit(k, self.column_type_id) for k in events.columns}
  
             # Extract unique values for vocab dictionary
-            vocab_dict[table_name] = {col: {'word': set(), 'numeric': False} for col in events.columns if col not in [self.icustay_key, "TIME"]}
+            vocab_dict[table_name] = {col: {'value': set(), 'word': set(), 'numeric': False} for col in events.columns if col not in [self.icustay_key, "TIME"]}
             for col in events.columns:
                 if col in [self.icustay_key, "TIME"]:
                     continue
@@ -529,6 +529,9 @@ class EHR(object):
                         text = re.sub(r"\d*\.\d+", lambda x: str(round(float(x.group(0)), 4)), str(row[col]))
                         text = re.sub(r"([0-9\.])", r" \1 ", text)
                         tokenized_text = self.tokenizer.decode(self.tokenizer.encode(text)[1:-1])
+
+                        vocab_dict[table_name][col]['value'].add(tokenized_text)
+
                         words = tokenized_text.split()
                         vocab_dict[table_name][col]['word'].update(words)
 
@@ -580,7 +583,7 @@ class EHR(object):
             events_dfs.append(events)
         return reduce(lambda x, y: x.union(y), events_dfs), vocab_dict
 
-
+    
     def make_input(self, cohorts, events, vocab_dict, spark):
         @F.pandas_udf(returnType="TIME int", functionType=F.PandasUDFType.GROUPED_MAP)
         def _make_input(events):
@@ -641,10 +644,10 @@ class EHR(object):
             with open(os.path.join(self.cache_dir, self.ehr_name, f"{stay_id}.pkl"), "wb") as f:
                 pickle.dump(data, f)
             return events["TIME"].to_frame()
-
+        
         shutil.rmtree(os.path.join(self.cache_dir, self.ehr_name), ignore_errors=True)
         os.makedirs(os.path.join(self.cache_dir, self.ehr_name), exist_ok=True)
-
+        """
         events.groupBy(self.icustay_key).apply(_make_input).write.mode("overwrite").format("noop").save()
 
         logger.info("Finish Data Preprocessing. Start to write to hdf5")
@@ -701,6 +704,7 @@ class EHR(object):
             # active_stay_ids.append(int(stay_id))
 
         # Create Predef Vocab Dictionary
+        """
         predef_vocab = dict()
         for table in vocab_dict.keys():
             table_key = re.sub(r"([0-9\.])", r" \1 ", table)
@@ -718,13 +722,17 @@ class EHR(object):
                     )
                 else:
                     predef_vocab[table_key][column_key] = (
-                        {"word": list(set(vocab_dict[table][column]['word']))},
+                        {
+                            "word": list(set(vocab_dict[table][column]['word'])),
+                            "value": list(set(vocab_dict[table][column]['value']))
+                        },
                         numeric
                     )
 
         with open(os.path.join(self.dest, f"{self.ehr_name}_predef_vocab.pickle"), 'wb') as handle:
             pickle.dump(predef_vocab, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
+        return
         shutil.rmtree(os.path.join(self.cache_dir, self.ehr_name), ignore_errors=True)
         # Drop patients with few events
 
